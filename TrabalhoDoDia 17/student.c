@@ -68,7 +68,6 @@ char rc_msg [MAX_MSG_SIZE];
 int rev_msg_len = read_pipe(pipe_in, rcv_msg, MAX_MSG_SIZE-1):
 
 // Emprimir alguma informação
-
 // Remove fifo de leitura
 
 return (0);
