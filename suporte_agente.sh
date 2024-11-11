@@ -48,8 +48,3 @@ while read request; do
 done < $pipe
 
 echo "Support Agent: read request terminated"
-
-
-
-
-
