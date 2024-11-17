@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -6,90 +5,89 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
-#include <errno.h>
 
+#define MAX_MSG_SIZE 300
 #define SUPPORT_PIPE "/tmp/support"
-#define MAX_MSG_SIZE 80
-
-// Função para ler do pipe até encontrar o '\0'
-int read_pipe(int pipe, char *buffer, int max_buffer_size) {
-    int i = 0;
-    char ch;
-    while (i < max_buffer_size - 1) {
-        if (read(pipe, &ch, 1) <= 0) {
-            return -1; // erro ou EOF
-        }
-        if (ch == '\0') {
-            break;
-        }
-        buffer[i++] = ch;
-    }
-    buffer[i] = '\0';
-    return i; // tamanho da mensagem lida
-}
 
 int main(int argc, char *argv[]) {
-    int student_inicial, numero_students;
-    char *support_pipename = SUPPORT_PIPE;
-
-    // Verificar argumentos
-    if ((argc < 3) || (argc > 4)) {
-        printf("Uso: ./student <student_inicial> <num_students> [<support_pipe>]\n");
+    if (argc < 3) {
+        fprintf(stderr, "Parâmetros: %s <student_id> <num_students> <message>\n", argv[0]);
         return 1;
     }
 
-    student_inicial = atoi(argv[1]);
-    numero_students = atoi(argv[2]);
+    //atoi para converter os argumentos para inteiros
 
-    if (argc == 4) {
-        support_pipename = argv[3];
+    int student_id = atoi(argv[1]);
+    int num_student = atoi(argv[2]);
+    char *message = argv[3];
+
+
+    //snprintf(pra onde vai, size do buffer, "formato", o q sera formatado);
+    char pipe_name[100];
+    snprintf(pipe_name, sizeof(pipe_name), "%d", student_id);
+
+    // Verifica se o pipe do estudante já existe e remove se necessário
+    if (access(pipe_name, F_OK) == 0) {
+        unlink(pipe_name);  // Remove o pipe se ele já existir
     }
 
-    // Criar o pipe de leitura para este student ("/tmp/student_<student_inicial>")
-    char *pipe_in_name = NULL;
-    asprintf(&pipe_in_name, "/tmp/student_%d", student_inicial);
-    if (mkfifo(pipe_in_name, 0666) < 0) {
-        perror("Erro ao criar o named pipe de leitura");
+    // Cria o pipe do estudante
+    if (mkfifo(pipe_name, 0666) < 0) {
+        perror("Erro ao criar o pipe");
         return 1;
     }
 
-    int pipe_in = open(pipe_in_name, O_RDONLY | O_NONBLOCK);
-    if (pipe_in < 0) {
-        perror("Erro ao abrir o named pipe de leitura");
+    printf("Pipe criado: %s\n", pipe_name);
+
+    // Verifica se o pipe de suporte existe e cria se necessário 
+    //No access recebe o caminho a ser verificado e o f_ok verifica se existe
+    if (access(SUPPORT_PIPE, F_OK) != 0) {
+        if (mkfifo(SUPPORT_PIPE, 0666) < 0) {
+            perror("Erro ao cria o pipe do suporte");
+            return 1;
+        }
+    }
+
+    // Abre o pipe de suporte
+    int support_pipe_fd = open(SUPPORT_PIPE, O_WRONLY);
+    if (support_pipe_fd < 0) {
+        perror("Não deu para abrir o pipe");
         return 1;
     }
 
-    int pipe_out = open(support_pipename, O_WRONLY);
-    if (pipe_out < 0) {
-        perror("Erro ao abrir o named pipe de escrita");
+    // Abre o pipe de suporte para enviar mensagem
+    char buffer[MAX_MSG_SIZE];
+    snprintf(buffer, sizeof(buffer), "%d %d %s\n", student_id, num_student, pipe_name); // Adicionar '\n' à mensagem
+    if (write(support_pipe_fd, buffer, strlen(buffer) + 1) < 0) {
+        perror("Não deu para escrever no pipe");
+        close(support_pipe_fd);  // Fechar pipe antes de retornar
         return 1;
     }
 
-    // Criar a mensagem para enviar
-    char *message = NULL;
-    int msg_len = asprintf(&message, "%d %d %s", student_inicial, numero_students, pipe_in_name);
-    // Enviar mensagem para o pipe ("/tmp/support")
-    if (write(pipe_out, message, msg_len + 1) < 0) {
-        perror("Erro ao enviar mensagem pelo pipe de escrita");
-        return 1;
-    }
-    free(message);
+    printf("Mensagem enviada: %s\n", buffer);
 
-    // Ler resposta via o pipe ("/tmp/student_<student_inicial>")
-    char rcv_msg[MAX_MSG_SIZE];
-    int rcv_msg_len = read_pipe(pipe_in, rcv_msg, MAX_MSG_SIZE);
-    if (rcv_msg_len < 0) {
-        perror("Erro ao ler a resposta do pipe de leitura");
+    // Abrir pipe para leitura
+    //Abre o pipe exclusivo do estudante no modo de leitura para receber a resposta
+    int pipe_fd = open(pipe_name, O_RDONLY);
+    if (pipe_fd < 0) {
+        perror("Erro ao abrir a resposta do aluno");
+        unlink(pipe_name); // Remover pipe em caso de erro
+        close(support_pipe_fd); // Fechar o pipe de suporte
         return 1;
     }
 
-    // Imprimir a mensagem recebida
-    printf("Student %d: alunos inscritos=%s\n", student_inicial, rcv_msg);
+    // Ler resposta do suporte (se necessário)
+    char response[MAX_MSG_SIZE];
+    if (read(pipe_fd, response, sizeof(response)) < 0) {
+        perror("Error ao ler a resposta do aluno");
+    } else {
+        printf("Resposta do aluno: %s\n", response);
+    }
 
-    // Fechar e remover o pipe de leitura
-    close(pipe_in);
-    unlink(pipe_in_name);
-    free(pipe_in_name);
+    // Fechar e remover pipes
+    close(pipe_fd);
+    unlink(pipe_name);
+    close(support_pipe_fd);
 
     return 0;
 }

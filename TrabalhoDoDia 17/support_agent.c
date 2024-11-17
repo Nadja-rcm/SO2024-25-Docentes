@@ -1,122 +1,150 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <pthread.h>
+#include <sys/types.h>
 #include <sys/stat.h>
-#include <errno.h>
+#include <string.h>
+#include <pthread.h>
 
+#define MAX_MSG_SIZE 256
 #define SUPPORT_PIPE "/tmp/support"
-#define MAX_MSG_SIZE 80
-#define NDISCIP 5
-#define NHOR 3
-#define NLUG 10
+#define MAX_DISCIPLINAS 5
 
-// Estrutura para armazenar informações das disciplinas e horários
 typedef struct {
-    int vagas[NHOR];
+    char nome[32];
+    int inscritos;
+    pthread_mutex_t lock; //para proteger o acesso ao número de inscritos
 } Disciplina;
 
-Disciplina disciplinas[NDISCIP];
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+Disciplina disciplinas[MAX_DISCIPLINAS];
 
-// Função para processar pedidos e inscrever alunos
-void *process_request(void *arg) {
-    int pipe_in_fd = *(int *)arg;
-    free(arg);
-    
-    char buffer[MAX_MSG_SIZE];
+// Mutexes globais
+pthread_mutex_t pipe_lock = PTHREAD_MUTEX_INITIALIZER;  // Para proteger o pipe, o thread lê do pipe por vez
+pthread_mutex_t alunos_lock = PTHREAD_MUTEX_INITIALIZER;  // Para proteger a contagem de alunos
+
+int alunos_inscritos = 0;
+
+// Função para inicializar as disciplinas
+void inicializar_disciplinas() {
+    for (int i = 0; i < MAX_DISCIPLINAS; i++) {
+        snprintf(disciplinas[i].nome, sizeof(disciplinas[i].nome), "Disciplina %d", i + 1);
+        disciplinas[i].inscritos = 0;
+        pthread_mutex_init(&(disciplinas[i].lock), NULL);
+    }
+}
+
+// Função para inscrever alunos nas disciplinas
+void inscrever_alunos(int aluno_inicial, int num_alunos) {
+    for (int i = 0; i < MAX_DISCIPLINAS; i++) {
+        pthread_mutex_lock(&(disciplinas[i].lock));
+        disciplinas[i].inscritos += num_alunos;
+        printf("Inscrição concluida: %s - Total inscritos: %d\n", disciplinas[i].nome, disciplinas[i].inscritos);
+        pthread_mutex_unlock(&(disciplinas[i].lock));
+    }
+}
+
+// Função para lidar com cada thread de suporte
+void *support_thread(void *arg) {
+
+    // Abrir o pipe para leitura
+    int pipe_fd = open(SUPPORT_PIPE, O_RDONLY);
+    if (pipe_fd < 0) {
+        perror("Não deu para abrir o pipe de suporte ");
+        return NULL;
+    }
+
+    char buf[MAX_MSG_SIZE];
+    int bytes_read;
+
     while (1) {
-        int len = read(pipe_in_fd, buffer, MAX_MSG_SIZE - 1);
-        if (len <= 0) continue;
-        
-        buffer[len] = '\0';
+        pthread_mutex_lock(&pipe_lock);
+        bytes_read = read(pipe_fd, buf, MAX_MSG_SIZE);
+        pthread_mutex_unlock(&pipe_lock);
 
-        // Extrair informações da mensagem recebida
-        int aluno_inicial, num_alunos;
-        char response_pipe[MAX_MSG_SIZE];
-        sscanf(buffer, "%d %d %s", &aluno_inicial, &num_alunos, response_pipe);
+        if (bytes_read > 0) {
+            printf("Mensagem recebida: %s\n", buf);
 
-        int alunos_inscritos = 0;
+            int aluno_inicial, num_alunos;
+            char resp_pipe_name[255];
+            sscanf(buf, "%d %d %s", &aluno_inicial, &num_alunos, resp_pipe_name);
 
-        // Lock para garantir exclusão mútua ao acessar as vagas
-        pthread_mutex_lock(&lock);
-        for (int d = 0; d < NDISCIP && alunos_inscritos < num_alunos; d++) {
-            for (int h = 0; h < NHOR && alunos_inscritos < num_alunos; h++) {
-                if (disciplinas[d].vagas[h] > 0) {
-                    int vagas = (num_alunos - alunos_inscritos) < disciplinas[d].vagas[h]
-                        ? (num_alunos - alunos_inscritos) : disciplinas[d].vagas[h];
-                    disciplinas[d].vagas[h] -= vagas;
-                    alunos_inscritos += vagas;
-                }
+            // Inscrever alunos nas disciplinas
+            inscrever_alunos(aluno_inicial, num_alunos);
+
+            // Atualizar o total de alunos inscritos
+            pthread_mutex_lock(&alunos_lock);
+            alunos_inscritos += num_alunos;
+            pthread_mutex_unlock(&alunos_lock);
+
+            // Enviar resposta ao aluno
+            int student_pipe_fd = open(resp_pipe_name, O_WRONLY);
+            if (student_pipe_fd < 0) {
+                perror("Não deu para abrir o pipe do aluno");
+                continue;
             }
-        }
-        pthread_mutex_unlock(&lock);
 
-        // Enviar resposta para o student
-        int response_fd = open(response_pipe, O_WRONLY);
-        if (response_fd >= 0) {
-            char response_msg[MAX_MSG_SIZE];
-            snprintf(response_msg, MAX_MSG_SIZE, "%d", alunos_inscritos);
-            write(response_fd, response_msg, strlen(response_msg) + 1);
-            close(response_fd);
+            char response[MAX_MSG_SIZE];
+            int resp_len = sprintf(response, "%d alunos inscritos", num_alunos);
+            if (write(student_pipe_fd, response, resp_len + 1) < 0) {
+                perror("Error writing to student pipe");
+            } else {
+                printf("Sent response to student: %s\n", response);
+            }
+
+            close(student_pipe_fd);
+        } else if (bytes_read < 0) {
+            perror("Error reading from support pipe");
         }
     }
+
+    // Fechar o pipe de leitura
+    close(pipe_fd);
     return NULL;
 }
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Uso: ./support_agent <numero_de_alunos>\n");
-        return 1;
-    }
-    
-    int num_alunos = atoi(argv[1]);
-
-    // Inicializar vagas das disciplinas
-    for (int i = 0; i < NDISCIP; i++) {
-        for (int j = 0; j < NHOR; j++) {
-            disciplinas[i].vagas[j] = NLUG;
-        }
-    }
-
-    // Criar o pipe principal para receber os pedidos
-    mkfifo(SUPPORT_PIPE, 0666);
-    int pipe_in_fd = open(SUPPORT_PIPE, O_RDONLY);
-    if (pipe_in_fd < 0) {
-        perror("Erro ao abrir o pipe principal");
+        fprintf(stderr, "Usage: %s <total_students>\n", argv[0]);
         return 1;
     }
 
-    // Criar threads para processar os pedidos
-    pthread_t threads[10];
-    for (int i = 0; i < 10; i++) {
-        int *arg = malloc(sizeof(int));
-        *arg = pipe_in_fd;
-        pthread_create(&threads[i], NULL, process_request, arg);
+    int total_students = atoi(argv[1]);
+    printf("Support agent is running and waiting for messages...\n");
+
+    inicializar_disciplinas();
+
+    int num_threads = 5;
+    pthread_t threads[num_threads];
+
+    // Iniciar threads de suporte
+    for (int i = 0; i < num_threads; i++) {
+        pthread_create(&(threads[i]), NULL, support_thread, NULL);
     }
 
-    // Aguardar todos os alunos serem inscritos
-    while (num_alunos > 0) {
-        sleep(1);
-        pthread_mutex_lock(&lock);
-        int total_vagas = 0;
-        for (int d = 0; d < NDISCIP; d++) {
-            for (int h = 0; h < NHOR; h++) {
-                total_vagas += disciplinas[d].vagas[h];
-            }
+    // Esperar que todos os alunos sejam inscritos
+    while (1) {
+        pthread_mutex_lock(&alunos_lock);
+        if (alunos_inscritos >= total_students) {
+            pthread_mutex_unlock(&alunos_lock);
+            break;
         }
-        if (total_vagas == 0) {
-            num_alunos = 0;
-        }
-        pthread_mutex_unlock(&lock);
+        pthread_mutex_unlock(&alunos_lock);
+        usleep(1000);  // Dormir um pouco
     }
 
-    // Fechar e remover o pipe principal
-    close(pipe_in_fd);
-    unlink(SUPPORT_PIPE);
+    // Cancelar threads
+    for (int i = 0; i < num_threads; i++) {
+        pthread_cancel(threads[i]);
+    }
+
+    // Liberar recursos
+    for (int i = 0; i < MAX_DISCIPLINAS; i++) {
+        pthread_mutex_destroy(&(disciplinas[i].lock));
+    }
+
+    pthread_mutex_destroy(&pipe_lock);
+    pthread_mutex_destroy(&alunos_lock);
 
     return 0;
 }
