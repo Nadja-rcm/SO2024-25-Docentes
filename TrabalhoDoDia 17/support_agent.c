@@ -87,14 +87,14 @@ void *support_thread(void *arg) {
             char response[MAX_MSG_SIZE];
             int resp_len = sprintf(response, "%d alunos inscritos", num_alunos);
             if (write(student_pipe_fd, response, resp_len + 1) < 0) {
-                perror("Error writing to student pipe");
+                perror("Não deu para escrever o pipe do aluno");
             } else {
-                printf("Sent response to student: %s\n", response);
+                printf("Enviando a resposta para o aluno: %s\n", response);
             }
 
             close(student_pipe_fd);
         } else if (bytes_read < 0) {
-            perror("Error reading from support pipe");
+            perror("Error ao ler o pipe de suporte");
         }
     }
 
@@ -105,12 +105,12 @@ void *support_thread(void *arg) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <total_students>\n", argv[0]);
+        fprintf(stderr, "Parâmetros: %s <total_students>\n", argv[0]);
         return 1;
     }
 
     int total_students = atoi(argv[1]);
-    printf("Support agent is running and waiting for messages...\n");
+    //aguardando as mensagens
 
     inicializar_disciplinas();
 

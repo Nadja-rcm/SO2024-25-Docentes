@@ -3,7 +3,7 @@
 # Verifica se os argumentos foram fornecidos
 if [ $# -lt 3 ]; then
   echo "Uso: $0 <NALUN> <NDISCIP> <NSTUD>"
-  exit 1
+  exit 
 fi
 
 NALUN=$1       # Número total de alunos
